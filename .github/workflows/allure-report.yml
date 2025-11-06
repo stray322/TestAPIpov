@@ -46,7 +46,7 @@ jobs:
           ls -la
           echo "🔧 Available startup methods:"
           [ -f "Makefile" ] && echo "✅ Makefile found" || echo "❌ No Makefile"
-          [ -f "docker-compose.yml" ] && echo "✅ docker-compose.yml found" || echo "❌ No docker-compose.yml"
+          [ -f "docker-compose.yaml" ] && echo "✅ docker-compose.yaml found" || echo "❌ No docker-compose.yaml"
 
       # 👇 Шаг 3: Запускаем сервисы через Docker Compose
       - name: Start services with Docker Compose
