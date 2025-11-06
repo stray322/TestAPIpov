@@ -24,37 +24,116 @@ jobs:
       - name: Clone application repository
         run: |
           echo "📥 Cloning application repository..."
-          git clone https://github.com/bondarenkokate73/simbirsoft_sdet_project.git app-repo
+          git clone https://github.com/your-username/your-app-repo.git app-repo
           cd app-repo
+          echo "📁 Application structure:"
           ls -la
 
-      - name: Start application services
+      - name: Fix migration issue
         run: |
-          echo "🚀 Starting application services..."
+          echo "🔧 Fixing migration issue..."
           cd app-repo
-          docker-compose up --build -d
+          # Проверяем и исправляем команду миграции
+          if grep -q "up, 3" docker-compose.yml; then
+            echo "🔄 Fixing migrate command..."
+            sed -i 's/command: \["-path", "\/migrations", "-database", "postgres:\/\/\${POSTGRES_USER}:\${POSTGRES_PASSWORD}@postgres:\${POSTGRES_PORT}\/\${POSTGRES_DB}?sslmode=disable", "up", "3"\]/command: ["-path", "\/migrations", "-database", "postgres:\/\/\${POSTGRES_USER}:\${POSTGRES_PASSWORD}@postgres:5432\/\${POSTGRES_DB}?sslmode=disable", "up"]/' docker-compose.yml
+          fi
+          cat docker-compose.yml | grep -A5 "migrate:"
 
-      - name: Wait for services to be ready
+      - name: Start database and migrations
         run: |
-          echo "⏳ Waiting for application to be ready..."
+          echo "🐘 Starting database and migrations..."
+          cd app-repo
+          # Сначала запускаем только postgres
+          docker-compose up -d postgres
+          sleep 10
           
-          # Ждем запуска сервиса
-          for i in {1..30}; do
-            if curl -s -f http://localhost:8080 > /dev/null 2>&1; then
-              echo "✅ Application is ready on port 8080!"
+          # Проверяем, что Postgres готов
+          for i in {1..10}; do
+            if docker-compose exec -T postgres pg_isready -U $POSTGRES_USER; then
+              echo "✅ Postgres is ready"
               break
             fi
-            echo "Attempt $i/30 - Application not ready..."
+            echo "Waiting for Postgres... $i/10"
+            sleep 5
+          done
+          
+          # Запускаем миграции
+          echo "🔄 Running migrations..."
+          docker-compose up migrate
+          
+          # Проверяем статус миграций
+          if [ $? -eq 0 ]; then
+            echo "✅ Migrations completed successfully"
+          else
+            echo "⚠️ Migrations had issues, but continuing..."
+          fi
+
+      - name: Start application service
+        run: |
+          echo "🚀 Starting application service..."
+          cd app-repo
+          docker-compose up -d service
+          
+          # Даем приложению время на запуск
+          sleep 20
+
+      - name: Check application status
+        run: |
+          echo "🔍 Checking application status..."
+          cd app-repo
+          echo "📊 Running containers:"
+          docker-compose ps
+          
+          echo "🔍 Service logs:"
+          docker-compose logs service --tail=50
+          
+          echo "🔍 Checking network:"
+          docker network ls
+
+      - name: Wait for application to be ready
+        run: |
+          echo "⏳ Waiting for application to be ready..."
+          cd app-repo
+          
+          # Улучшенная проверка готовности
+          for i in {1..40}; do
+            # Проверяем, что контейнер работает
+            if ! docker-compose ps service | grep -q "Up"; then
+              echo "❌ Service container is not running"
+              docker-compose logs service
+              exit 1
+            fi
+          
+            # Пробуем разные эндпоинты
+            if curl -s -f http://localhost:8080 > /dev/null 2>&1; then
+              echo "✅ Application is responding on port 8080!"
+              break
+            fi
+          
+            if curl -s -f http://localhost:8080/health > /dev/null 2>&1; then
+              echo "✅ Health endpoint is responding!"
+              break
+            fi
+          
+            if curl -s -f http://localhost:8080/api > /dev/null 2>&1; then
+              echo "✅ API endpoint is responding!"
+              break
+            fi
+          
+            echo "Attempt $i/40 - Application not ready..."
             sleep 5
           done
           
           # Финальная проверка
           if curl -s -f http://localhost:8080 > /dev/null; then
-            echo "🎉 Application is responding!"
+            echo "🎉 Application is ready for testing!"
           else
-            echo "❌ Application failed to start"
-            cd app-repo
-            docker-compose logs
+            echo "❌ Application failed to start properly"
+            echo "📋 Final container status:"
+            docker-compose ps -a
+            echo "🔍 Final service logs:"
+            docker-compose logs service
             exit 1
           fi
 
@@ -66,14 +145,14 @@ jobs:
 
       - name: Run API tests
         run: |
-          echo "🧪 Running API tests against the application..."
+          echo "🧪 Running API tests..."
           mvn clean test -Dbase.url=http://localhost:8080/api
         continue-on-error: true
 
-      - name: Stop application services
+      - name: Stop all services
         if: always()
         run: |
-          echo "🛑 Stopping application services..."
+          echo "🛑 Stopping all services..."
           cd app-repo
           docker-compose down
 
