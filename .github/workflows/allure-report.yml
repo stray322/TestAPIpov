@@ -13,136 +13,59 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
-      # 👇 Шаг 1: Устанавливаем Docker Compose
       - name: Setup Docker Compose
         run: |
-          echo "🐋 Installing Docker Compose..."
           sudo curl -L "https://github.com/docker/compose/releases/download/v2.24.0/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
           sudo chmod +x /usr/local/bin/docker-compose
-          docker-compose --version
-          echo "✅ Docker Compose installed successfully"
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
           java-version: '17'
           distribution: 'temurin'
-          cache: maven
 
-      - name: Cache Maven packages
-        uses: actions/cache@v3
-        with:
-          path: ~/.m2
-          key: ${{ runner.os }}-m2-${{ hashFiles('**/pom.xml') }}
-          restore-keys: ${{ runner.os }}-m2
-
-      # 👇 Шаг 2: Проверяем структуру проекта
       - name: Check project structure
         run: |
           echo "📁 Project structure:"
           ls -la
-          echo "🔧 Available startup methods:"
-          [ -f "Makefile" ] && echo "✅ Makefile found" || echo "❌ No Makefile"
-          [ -f "docker-compose.yaml" ] && echo "✅ docker-compose.yaml found" || echo "❌ No docker-compose.yaml"
+          [ -f "docker-compose.yml" ] && echo "✅ docker-compose.yml found" || echo "❌ No docker-compose.yml"
 
-      # 👇 Шаг 3: Запускаем сервисы через Docker Compose
       - name: Start services with Docker Compose
         run: |
           echo "🐋 Starting services using Docker Compose..."
           docker-compose up --build -d
-          echo "✅ Services started with Docker Compose"
 
-      # 👇 Шаг 4: Проверяем запущенные сервисы
-      - name: Check running services
-        run: |
-          echo "📊 Running containers:"
-          docker ps -a
-          echo "🔍 Service logs (last 10 lines):"
-          docker-compose logs --tail=10 || echo "No logs available"
-
-      # 👇 Шаг 5: Ждем готовности сервисов
       - name: Wait for services to be ready
         run: |
           echo "⏳ Waiting for services to be ready..."
+          sleep 30
+          docker-compose ps
           
-          # Основная проверка на порту 8080
           for i in {1..30}; do
-            if curl -s -f http://localhost:8080 > /dev/null 2>&1; then
-              echo "✅ Main service is ready on port 8080!"
+            if curl -s http://localhost:8080 > /dev/null; then
+              echo "✅ Main service is ready!"
               break
             fi
             echo "Attempt $i/30 - Service not ready..."
             sleep 5
           done
-          
-          # Финальная проверка
-          if curl -s -f http://localhost:8080 > /dev/null; then
-            echo "🎉 Service is responding!"
-          else
-            echo "❌ Service failed to start"
-            docker-compose logs
-            exit 1
-          fi
 
-      # 👇 Шаг 6: Запускаем тесты
       - name: Run API tests
         run: |
           echo "🧪 Running API tests..."
-          
-          # Создаем конфигурацию для тестов
-          mkdir -p src/main/resources
-          cat > src/main/resources/config.properties << EOF
-          base.url=http://localhost:8080/api
-          allure.results.directory=target/allure-results
-          EOF
-          
-          # Запускаем тесты
           mvn clean test -Dbase.url=http://localhost:8080/api
         continue-on-error: true
 
-      # 👇 Шаг 7: Останавливаем сервисы
       - name: Stop services
         if: always()
         run: |
-          echo "🛑 Stopping services..."
           docker-compose down
-          echo "✅ Services stopped"
 
-      # 👇 Шаг 8: Подготовка результатов Allure
-      - name: Prepare Allure results
-        run: |
-          echo "📊 Preparing Allure results..."
-          mkdir -p allure-results
-          
-          if [ -d "target/allure-results" ] && [ "$(ls -A target/allure-results)" ]; then
-            echo "✅ Test results found, copying..."
-            cp -r target/allure-results/* allure-results/
-            echo "Copied $(find allure-results -type f | wc -l) files"
-          else
-            echo "⚠️ No test results found, creating placeholder..."
-            mkdir -p allure-results
-            cat > allure-results/result.json << EOF
-            {
-              "name": "CI Test Run",
-              "status": "passed",
-              "steps": []
-            }
-            EOF
-          fi
-
-      - name: Setup Git identity
-        run: |
-          git config --global user.name "GitHub Actions"
-          git config --global user.email "actions@github.com"
-
-      # 👇 Шаг 9: Генерация и публикация отчета Allure
       - name: Generate and Publish Allure report
         uses: simple-elf/allure-report-action@master
         if: always()
         with:
-          allure_results: allure-results
+          allure_results: target/allure-results
           allure_report: allure-report
           keep_reports: 5
