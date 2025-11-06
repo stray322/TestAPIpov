@@ -30,35 +30,89 @@ jobs:
           key: ${{ runner.os }}-m2-${{ hashFiles('**/pom.xml') }}
           restore-keys: ${{ runner.os }}-m2
 
-      # 👇 Шаг 1: Запуск сервиса (выберите подходящий вариант)
-      - name: Start API service
+      # 👇 Шаг 1: Проверяем доступные методы запуска
+      - name: Check available startup methods
         run: |
-          # Вариант A - Если есть Docker Compose
-          if [ -f "docker-compose.yml" ]; then
-            docker-compose up -d
-            sleep 30
-          # Вариант B - Если Spring Boot приложение
-          elif [ -f "pom.xml" ]; then
-            mvn spring-boot:run &
-            sleep 60
+          echo "📁 Project structure:"
+          ls -la
+          echo "🔧 Available startup methods:"
+          [ -f "Makefile" ] && echo "✅ Makefile found" && make help || echo "❌ No Makefile or no help target"
+          [ -f "docker-compose.yml" ] && echo "✅ docker-compose.yml found" && cat docker-compose.yml | head -10 || echo "❌ No docker-compose.yml"
+
+      # 👇 Шаг 2: Запускаем сервис (предпочтительно через Makefile)
+      - name: Start services
+        run: |
+          if [ -f "Makefile" ]; then
+            echo "🔨 Starting services with Makefile..."
+            make run
+          elif [ -f "docker-compose.yml" ]; then
+            echo "🐋 Starting services with Docker Compose..."
+            docker-compose up --build -d
           else
-            echo "No service startup method found"
+            echo "❌ No startup method found"
+            exit 1
           fi
 
-      # 👇 Шаг 2: Проверка доступности сервиса
-      - name: Wait for service to be ready
+      # 👇 Шаг 3: Проверяем статус сервисов
+      - name: Check services status
         run: |
-          echo "Waiting for service on port 8080..."
+          echo "📊 Checking running containers:"
+          docker ps -a
+          echo "🔍 Checking service logs:"
+          if [ -f "docker-compose.yml" ]; then
+            docker-compose logs --tail=20 || echo "No docker-compose logs"
+          fi
+          # Проверяем процессы
+          echo "🔄 Checking running processes:"
+          ps aux | grep java || echo "No Java processes"
+
+      # 👇 Шаг 4: Ждем пока сервисы станут доступны
+      - name: Wait for services to be ready
+        run: |
+          echo "⏳ Waiting for services to be ready..."
+          
+          # Ждем основной сервис на порту 8080
           for i in {1..30}; do
-            if curl -s http://localhost:8080 > /dev/null || nc -z localhost 8080; then
-              echo "✅ Service is ready!"
+            if curl -s http://localhost:8080 > /dev/null 2>&1; then
+              echo "✅ Main service is ready on port 8080!"
               break
             fi
-            echo "⏳ Waiting for service... Attempt $i/30"
+            echo "Attempt $i/30 - Main service not ready yet..."
             sleep 5
           done
+          
+          # Проверяем дополнительные порты если нужно
+          for port in 5432 3306 27017; do
+            if nc -z localhost $port; then
+              echo "✅ Service is running on port $port"
+            fi
+          done
+          
+          # Финальная проверка основного сервиса
+          if curl -s http://localhost:8080 > /dev/null; then
+            echo "🎉 All services are ready!"
+          else
+            echo "❌ Services failed to start properly"
+            if [ -f "docker-compose.yml" ]; then
+              docker-compose logs
+            fi
+            exit 1
+          fi
 
-      # 👇 Шаг 3: Запуск тестов
+      # 👇 Шаг 5: Запускаем миграции БД если нужно
+      - name: Run database migrations
+        run: |
+          if [ -f "Makefile" ] && make help | grep -q "migrate"; then
+            echo "🗃️ Running database migrations..."
+            make migrate
+          elif [ -f "docker-compose.yml" ]; then
+            echo "🗃️ Check if migrations are needed..."
+            # Если миграции запускаются автоматически в compose, ничего не делаем
+          else
+            echo "ℹ️ No migration step found or not needed"
+          fi
+
+      # 👇 Шаг 6: Запускаем тесты
       - name: Run API tests
         run: |
           # Создаем конфиг для тестов
@@ -66,34 +120,48 @@ jobs:
           echo "base.url=http://localhost:8080/api" > src/main/resources/config.properties
           echo "allure.results.directory=target/allure-results" >> src/main/resources/config.properties
           
-          # Запускаем тесты
+          echo "🧪 Running API tests..."
           mvn clean test -Dbase.url=http://localhost:8080/api
         continue-on-error: true
 
-      # 👇 Шаг 4: Подготовка результатов Allure
+      # 👇 Шаг 7: Останавливаем сервисы (даже если тесты упали)
+      - name: Stop services
+        if: always()
+        run: |
+          echo "🛑 Stopping services..."
+          if [ -f "Makefile" ] && make help | grep -q "stop"; then
+            make stop
+          elif [ -f "Makefile" ] && make help | grep -q "down"; then
+            make down
+          elif [ -f "docker-compose.yml" ]; then
+            docker-compose down
+          else
+            echo "ℹ️ No stop command found, stopping containers manually"
+            docker stop $(docker ps -q) 2>/dev/null || true
+          fi
+
+      # 👇 Шаг 8: Подготовка результатов Allure
       - name: Prepare Allure results
         run: |
           mkdir -p allure-results
           if [ -d "target/allure-results" ]; then
             echo "📊 Copying test results..."
             cp -r target/allure-results/* allure-results/
+            echo "✅ Copied $(find allure-results -type f | wc -l) test result files"
           else
             echo "⚠️ No test results found, creating empty results"
             mkdir -p allure-results
             echo '{"name": "CI Build", "status": "passed", "steps": []}' > allure-results/result.json
           fi
 
-      # 👇 Шаг 5: Настройка Git
       - name: Setup Git identity
         run: |
           git config --global user.name "GitHub Actions"
           git config --global user.email "actions@github.com"
 
-      # 👇 Шаг 6: Генерация и публикация отчета Allure (ИСПРАВЛЕНО)
       - name: Generate and Publish Allure report
         uses: simple-elf/allure-report-action@master
         if: always()
         with:
           allure_results: allure-results
           allure_report: allure-report
-          # Убраны неподдерживаемые параметры
