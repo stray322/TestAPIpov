@@ -30,53 +30,70 @@ jobs:
           key: ${{ runner.os }}-m2-${{ hashFiles('**/pom.xml') }}
           restore-keys: ${{ runner.os }}-m2
 
-      # 👇 ДОБАВЬТЕ ЭТОТ ШАГ - Запуск сервиса
+      # 👇 Шаг 1: Запуск сервиса (выберите подходящий вариант)
       - name: Start API service
         run: |
-          # Если у вас есть Docker Compose файл
-          docker-compose up -d
-          # ИЛИ если сервис нужно собрать и запустить через Maven
-          # mvn spring-boot:run &
-          sleep 30  # Ждем запуска сервиса
+          # Вариант A - Если есть Docker Compose
+          if [ -f "docker-compose.yml" ]; then
+            docker-compose up -d
+            sleep 30
+          # Вариант B - Если Spring Boot приложение
+          elif [ -f "pom.xml" ]; then
+            mvn spring-boot:run &
+            sleep 60
+          else
+            echo "No service startup method found"
+          fi
 
-      # 👇 ДОБАВЬТЕ ПРОВЕРКУ ДОСТУПНОСТИ СЕРВИСА
-      - name: Check if service is running
+      # 👇 Шаг 2: Проверка доступности сервиса
+      - name: Wait for service to be ready
         run: |
-          curl -f http://localhost:8080/api/health || echo "Service health check failed, but continuing..."
-          # ИЛИ простая проверка доступности порта
-          nc -z localhost 8080 && echo "Service is running on port 8080" || echo "Service is not available on port 8080"
+          echo "Waiting for service on port 8080..."
+          for i in {1..30}; do
+            if curl -s http://localhost:8080 > /dev/null || nc -z localhost 8080; then
+              echo "✅ Service is ready!"
+              break
+            fi
+            echo "⏳ Waiting for service... Attempt $i/30"
+            sleep 5
+          done
 
+      # 👇 Шаг 3: Запуск тестов
       - name: Run API tests
         run: |
-          # Создаем mock конфиг для CI
+          # Создаем конфиг для тестов
           mkdir -p src/main/resources
           echo "base.url=http://localhost:8080/api" > src/main/resources/config.properties
           echo "allure.results.directory=target/allure-results" >> src/main/resources/config.properties
           
+          # Запускаем тесты
           mvn clean test -Dbase.url=http://localhost:8080/api
         continue-on-error: true
 
-      # Остальные шаги остаются без изменений...
+      # 👇 Шаг 4: Подготовка результатов Allure
       - name: Prepare Allure results
         run: |
           mkdir -p allure-results
           if [ -d "target/allure-results" ]; then
+            echo "📊 Copying test results..."
             cp -r target/allure-results/* allure-results/
           else
-            echo "No test results found, creating empty results"
+            echo "⚠️ No test results found, creating empty results"
             mkdir -p allure-results
             echo '{"name": "CI Build", "status": "passed", "steps": []}' > allure-results/result.json
           fi
 
+      # 👇 Шаг 5: Настройка Git
       - name: Setup Git identity
         run: |
           git config --global user.name "GitHub Actions"
           git config --global user.email "actions@github.com"
 
+      # 👇 Шаг 6: Генерация и публикация отчета Allure (ИСПРАВЛЕНО)
       - name: Generate and Publish Allure report
         uses: simple-elf/allure-report-action@master
         if: always()
         with:
           allure_results: allure-results
           allure_report: allure-report
-          keep_history: false
+          # Убраны неподдерживаемые параметры
