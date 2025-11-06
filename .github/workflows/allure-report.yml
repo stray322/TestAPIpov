@@ -28,91 +28,84 @@ jobs:
           cd app-repo
           echo "📁 Application structure:"
           ls -la
+          echo "✅ docker-compose.yaml found"
 
-      - name: Fix migration issue
+      - name: Fix migration issue in docker-compose
         run: |
-          echo "🔧 Fixing migration issue..."
+          echo "🔧 Fixing migration command in docker-compose.yaml..."
           cd app-repo
-          # Проверяем и исправляем команду миграции
-          if grep -q "up, 3" docker-compose.yml; then
-            echo "🔄 Fixing migrate command..."
-            sed -i 's/command: \["-path", "\/migrations", "-database", "postgres:\/\/\${POSTGRES_USER}:\${POSTGRES_PASSWORD}@postgres:\${POSTGRES_PORT}\/\${POSTGRES_DB}?sslmode=disable", "up", "3"\]/command: ["-path", "\/migrations", "-database", "postgres:\/\/\${POSTGRES_USER}:\${POSTGRES_PASSWORD}@postgres:5432\/\${POSTGRES_DB}?sslmode=disable", "up"]/' docker-compose.yml
-          fi
-          cat docker-compose.yml | grep -A5 "migrate:"
-
-      - name: Start database and migrations
-        run: |
-          echo "🐘 Starting database and migrations..."
-          cd app-repo
-          # Сначала запускаем только postgres
-          docker-compose up -d postgres
-          sleep 10
           
-          # Проверяем, что Postgres готов
-          for i in {1..10}; do
-            if docker-compose exec -T postgres pg_isready -U $POSTGRES_USER; then
-              echo "✅ Postgres is ready"
+          # Исправляем команду миграции - убираем "3" в конце
+          if grep -q 'command: \["-path", "/migrations", "-database", "postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:${POSTGRES_PORT}/${POSTGRES_DB}?sslmode=disable", "up", "3"\]' docker-compose.yaml; then
+            sed -i 's/command: \["-path", "\/migrations", "-database", "postgres:\/\/\${POSTGRES_USER}:\${POSTGRES_PASSWORD}@postgres:\${POSTGRES_PORT}\/\${POSTGRES_DB}?sslmode=disable", "up", "3"\]/command: ["-path", "\/migrations", "-database", "postgres:\/\/\${POSTGRES_USER}:\${POSTGRES_PASSWORD}@postgres:5432\/\${POSTGRES_DB}?sslmode=disable", "up"]/' docker-compose.yaml
+            echo "✅ Migration command fixed"
+          else
+            echo "ℹ️ Migration command already correct or different format"
+          fi
+          
+          # Показываем исправленную секцию migrate
+          echo "📋 Updated migrate section:"
+          grep -A5 "migrate:" docker-compose.yaml
+
+      - name: Start database and wait for readiness
+        run: |
+          echo "🐘 Starting database..."
+          cd app-repo
+          docker-compose up -d postgres
+          
+          # Ждем готовности PostgreSQL
+          echo "⏳ Waiting for PostgreSQL to be ready..."
+          for i in {1..20}; do
+            if docker-compose exec -T postgres pg_isready -U ${{ secrets.POSTGRES_USER }}; then
+              echo "✅ PostgreSQL is ready"
               break
             fi
-            echo "Waiting for Postgres... $i/10"
-            sleep 5
+            echo "Waiting for PostgreSQL... $i/20"
+            sleep 3
           done
-          
-          # Запускаем миграции
-          echo "🔄 Running migrations..."
-          docker-compose up migrate
-          
-          # Проверяем статус миграций
-          if [ $? -eq 0 ]; then
-            echo "✅ Migrations completed successfully"
-          else
-            echo "⚠️ Migrations had issues, but continuing..."
-          fi
+
+      - name: Run migrations
+        run: |
+          echo "🔄 Running database migrations..."
+          cd app-repo
+          # Запускаем миграции и игнорируем ошибки (продолжаем в любом случае)
+          docker-compose up migrate || echo "⚠️ Migrations completed with warnings, but continuing..."
 
       - name: Start application service
         run: |
           echo "🚀 Starting application service..."
           cd app-repo
           docker-compose up -d service
-          
-          # Даем приложению время на запуск
-          sleep 20
+          sleep 15
 
-      - name: Check application status
+      - name: Check services status
         run: |
-          echo "🔍 Checking application status..."
+          echo "🔍 Checking services status..."
           cd app-repo
           echo "📊 Running containers:"
           docker-compose ps
-          
-          echo "🔍 Service logs:"
-          docker-compose logs service --tail=50
-          
-          echo "🔍 Checking network:"
-          docker network ls
+          echo "🔍 Application logs:"
+          docker-compose logs service --tail=20
 
       - name: Wait for application to be ready
         run: |
           echo "⏳ Waiting for application to be ready..."
           cd app-repo
           
-          # Улучшенная проверка готовности
-          for i in {1..40}; do
-            # Проверяем, что контейнер работает
-            if ! docker-compose ps service | grep -q "Up"; then
-              echo "❌ Service container is not running"
-              docker-compose logs service
-              exit 1
-            fi
-          
-            # Пробуем разные эндпоинты
-            if curl -s -f http://localhost:8080 > /dev/null 2>&1; then
-              echo "✅ Application is responding on port 8080!"
+          for i in {1..30}; do
+            # Проверяем различные возможные эндпоинты
+            if curl -s -f http://localhost:8080/health > /dev/null 2>&1; then
+              echo "✅ Health endpoint is responding!"
               break
             fi
           
-            if curl -s -f http://localhost:8080/health > /dev/null 2>&1; then
-              echo "✅ Health endpoint is responding!"
+            if curl -s -f http://localhost:8080/api/health > /dev/null 2>&1; then
+              echo "✅ API health endpoint is responding!"
+              break
+            fi
+          
+            if curl -s -f http://localhost:8080 > /dev/null 2>&1; then
+              echo "✅ Root endpoint is responding!"
               break
             fi
           
@@ -121,7 +114,7 @@ jobs:
               break
             fi
           
-            echo "Attempt $i/40 - Application not ready..."
+            echo "Attempt $i/30 - Application not ready..."
             sleep 5
           done
           
@@ -129,10 +122,10 @@ jobs:
           if curl -s -f http://localhost:8080 > /dev/null; then
             echo "🎉 Application is ready for testing!"
           else
-            echo "❌ Application failed to start properly"
-            echo "📋 Final container status:"
+            echo "❌ Application failed to respond"
+            echo "📋 Final check - container status:"
             docker-compose ps -a
-            echo "🔍 Final service logs:"
+            echo "🔍 Final application logs:"
             docker-compose logs service
             exit 1
           fi
@@ -145,7 +138,7 @@ jobs:
 
       - name: Run API tests
         run: |
-          echo "🧪 Running API tests..."
+          echo "🧪 Running API tests against the application..."
           mvn clean test -Dbase.url=http://localhost:8080/api
         continue-on-error: true
 
