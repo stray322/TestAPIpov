@@ -24,7 +24,7 @@ jobs:
       - name: Clone application repository
         run: |
           echo "📥 Cloning application repository..."
-          git clone https://github.com/your-username/your-app-repo.git app-repo
+          git clone https://github.com/bondarenkokate73/simbirsoft_sdet_project.git app-repo
           cd app-repo
           echo "📁 Application structure:"
           ls -la
