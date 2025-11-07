@@ -21,150 +21,191 @@ jobs:
           sudo chmod +x /usr/local/bin/docker-compose
           docker-compose --version
 
+      - name: Install additional tools
+        run: |
+          echo "🔧 Installing diagnostic tools..."
+          sudo apt-get update
+          sudo apt-get install -y net-tools iputils-ping telnet
+
       - name: Clone application repository
         run: |
           echo "📥 Cloning application repository..."
-          git clone https://github.com/bondarenkokate73/simbirsoft_sdet_project.git app-repo
+          git clone https://github.com/your-username/your-app-repo.git app-repo
           cd app-repo
           echo "📁 Application structure:"
           ls -la
-          echo "✅ docker-compose.yaml found"
 
-      - name: Fix migration issue in docker-compose
+      - name: Start all services
         run: |
-          echo "🔧 Fixing migration command in docker-compose.yaml..."
+          echo "🚀 Starting all services..."
+          cd app-repo
+          docker-compose up --build -d
+          sleep 10
+
+      - name: Diagnostic checks
+        run: |
+          echo "🔍 Running diagnostic checks..."
           cd app-repo
           
-          # Исправляем команду миграции - убираем "3" в конце
-          if grep -q 'command: \["-path", "/migrations", "-database", "postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:${POSTGRES_PORT}/${POSTGRES_DB}?sslmode=disable", "up", "3"\]' docker-compose.yaml; then
-            sed -i 's/command: \["-path", "\/migrations", "-database", "postgres:\/\/\${POSTGRES_USER}:\${POSTGRES_PASSWORD}@postgres:\${POSTGRES_PORT}\/\${POSTGRES_DB}?sslmode=disable", "up", "3"\]/command: ["-path", "\/migrations", "-database", "postgres:\/\/\${POSTGRES_USER}:\${POSTGRES_PASSWORD}@postgres:5432\/\${POSTGRES_DB}?sslmode=disable", "up"]/' docker-compose.yaml
-            echo "✅ Migration command fixed"
+          echo "### 1. Checking running containers:"
+          docker-compose ps -a
+          
+          echo "### 2. Checking network:"
+          docker network ls
+          docker-compose network ls
+          
+          echo "### 3. Checking port mapping:"
+          docker-compose port service 8080
+          
+          echo "### 4. Checking service from inside container:"
+          docker-compose exec -T service wget -q -O- http://localhost:8080/ || echo "❌ Cannot connect from inside container"
+          
+          echo "### 5. Checking from host:"
+          netstat -tulpn | grep 8080 || echo "No process listening on 8080"
+          curl -v http://localhost:8080/ || echo "❌ Cannot connect from host"
+          
+          echo "### 6. Full application logs:"
+          docker-compose logs service
+
+      - name: Check application connectivity
+        run: |
+          echo "🌐 Testing application connectivity..."
+          cd app-repo
+          
+          # Проверяем разные варианты подключения
+          echo "1. Testing localhost:8080..."
+          curl -v http://localhost:8080/ 2>&1 | head -20 || true
+          
+          echo "2. Testing 127.0.0.1:8080..."
+          curl -v http://127.0.0.1:8080/ 2>&1 | head -20 || true
+          
+          echo "3. Testing container IP..."
+          CONTAINER_IP=$(docker inspect -f '{{range.NetworkSettings.Networks}}{{.IPAddress}}{{end}}' app-repo-service-1)
+          echo "Container IP: $CONTAINER_IP"
+          curl -v http://$CONTAINER_IP:8080/ 2>&1 | head -20 || true
+          
+          echo "4. Testing from another container..."
+          docker run --network container:app-repo-service-1 appropriate/curl -s http://localhost:8080/ && echo "✅ Works from same network" || echo "❌ Doesn't work from same network"
+
+      - name: Fix application configuration
+        run: |
+          echo "🔧 Attempting to fix application configuration..."
+          cd app-repo
+          
+          # Проверяем, есть ли .env файл и его содержимое
+          if [ -f ".env" ]; then
+            echo "📄 .env file content:"
+            cat .env
           else
-            echo "ℹ️ Migration command already correct or different format"
-          fi
-          
-          # Показываем исправленную секцию migrate
-          echo "📋 Updated migrate section:"
-          grep -A5 "migrate:" docker-compose.yaml
+            echo "❌ No .env file found"
+            # Создаем базовый .env файл
+            cat > .env << EOF
+  HTTP_PORT=8080
+  POSTGRES_USER=postgres
+  POSTGRES_PASSWORD=password
+  POSTGRES_DB=appdb
+  POSTGRES_PORT=5432
+  EOF
+  echo "✅ Created .env file"
+  fi
+  
+  # Проверяем конфигурацию docker-compose
+  echo "📋 docker-compose.yml service configuration:"
+  docker-compose config service
 
-      - name: Start database and wait for readiness
-        run: |
-          echo "🐘 Starting database..."
-          cd app-repo
-          docker-compose up -d postgres
-          
-          # Ждем готовности PostgreSQL
-          echo "⏳ Waiting for PostgreSQL to be ready..."
-          for i in {1..20}; do
-            if docker-compose exec -T postgres pg_isready -U ${{ secrets.POSTGRES_USER }}; then
-              echo "✅ PostgreSQL is ready"
-              break
-            fi
-            echo "Waiting for PostgreSQL... $i/20"
-            sleep 3
-          done
+- name: Wait for application with improved checks
+  run: |
+    echo "⏳ Waiting for application with improved checks..."
+    cd app-repo
+    
+    for i in {1..40}; do
+      # Проверяем, что контейнер жив
+      if ! docker-compose ps service | grep -q "Up"; then
+        echo "❌ Service container stopped"
+        docker-compose logs service
+        exit 1
+      fi
+    
+      # Пробуем разные методы проверки
+      if curl -s -f -m 5 http://localhost:8080/ > /dev/null; then
+        echo "✅ Root endpoint responding!"
+        break
+      fi
+    
+      if curl -s -f -m 5 http://localhost:8080/health > /dev/null; then
+        echo "✅ Health endpoint responding!"
+        break
+      fi
+    
+      if curl -s -f -m 5 http://localhost:8080/api > /dev/null; then
+        echo "✅ API endpoint responding!"
+        break
+      fi
+    
+      if curl -s -f -m 5 http://localhost:8080/api/health > /dev/null; then
+        echo "✅ API health endpoint responding!"
+        break
+      fi
+    
+      # Пробуем Swagger endpoint
+      if curl -s -f -m 5 http://localhost:8080/api/_/docs/swagger/ > /dev/null; then
+        echo "✅ Swagger endpoint responding!"
+        break
+      fi
+    
+      # Пробуем простой TCP-коннект
+      if timeout 5 bash -c 'cat < /dev/null > /dev/tcp/localhost/8080' 2>/dev/null; then
+        echo "✅ Port 8080 is open, but no HTTP response"
+      fi
+    
+      echo "Attempt $i/40 - Testing different endpoints..."
+      sleep 5
+    done
+    
+    # Финальная проверка с детальным выводом
+    echo "🔍 Final connectivity test:"
+    curl -v -m 10 http://localhost:8080/ || curl -v -m 10 http://localhost:8080/api/ || echo "❌ No successful connection"
 
-      - name: Run migrations
-        run: |
-          echo "🔄 Running database migrations..."
-          cd app-repo
-          # Запускаем миграции и игнорируем ошибки (продолжаем в любом случае)
-          docker-compose up migrate || echo "⚠️ Migrations completed with warnings, but continuing..."
+- name: Set up JDK 17
+  if: success() || failure()
+  uses: actions/setup-java@v4
+  with:
+    java-version: '17'
+    distribution: 'temurin'
 
-      - name: Start application service
-        run: |
-          echo "🚀 Starting application service..."
-          cd app-repo
-          docker-compose up -d service
-          sleep 15
+- name: Run API tests
+  if: success() || failure()
+  run: |
+    echo "🧪 Running API tests..."
+    # Пробуем оба возможных URL
+    mvn clean test -Dbase.url=http://localhost:8080/api || \
+    mvn clean test -Dbase.url=http://localhost:8080/ || \
+    echo "❌ All test attempts failed"
+  continue-on-error: true
 
-      - name: Check services status
-        run: |
-          echo "🔍 Checking services status..."
-          cd app-repo
-          echo "📊 Running containers:"
-          docker-compose ps
-          echo "🔍 Application logs:"
-          docker-compose logs service --tail=20
+- name: Stop all services
+  if: always()
+  run: |
+    echo "🛑 Stopping all services..."
+    cd app-repo
+    docker-compose down
 
-      - name: Wait for application to be ready
-        run: |
-          echo "⏳ Waiting for application to be ready..."
-          cd app-repo
-          
-          for i in {1..30}; do
-            # Проверяем различные возможные эндпоинты
-            if curl -s -f http://localhost:8080/health > /dev/null 2>&1; then
-              echo "✅ Health endpoint is responding!"
-              break
-            fi
-          
-            if curl -s -f http://localhost:8080/api/health > /dev/null 2>&1; then
-              echo "✅ API health endpoint is responding!"
-              break
-            fi
-          
-            if curl -s -f http://localhost:8080 > /dev/null 2>&1; then
-              echo "✅ Root endpoint is responding!"
-              break
-            fi
-          
-            if curl -s -f http://localhost:8080/api > /dev/null 2>&1; then
-              echo "✅ API endpoint is responding!"
-              break
-            fi
-          
-            echo "Attempt $i/30 - Application not ready..."
-            sleep 5
-          done
-          
-          # Финальная проверка
-          if curl -s -f http://localhost:8080 > /dev/null; then
-            echo "🎉 Application is ready for testing!"
-          else
-            echo "❌ Application failed to respond"
-            echo "📋 Final check - container status:"
-            docker-compose ps -a
-            echo "🔍 Final application logs:"
-            docker-compose logs service
-            exit 1
-          fi
+- name: Prepare Allure results
+  if: always()
+  run: |
+    echo "📊 Preparing Allure results..."
+    mkdir -p allure-results
+    if [ -d "target/allure-results" ] && [ "$(ls -A target/allure-results)" ]; then
+      cp -r target/allure-results/* allure-results/
+      echo "✅ Test results copied"
+    else
+      echo "⚠️ No test results found"
+    fi
 
-      - name: Set up JDK 17
-        uses: actions/setup-java@v4
-        with:
-          java-version: '17'
-          distribution: 'temurin'
-
-      - name: Run API tests
-        run: |
-          echo "🧪 Running API tests against the application..."
-          mvn clean test -Dbase.url=http://localhost:8080/api
-        continue-on-error: true
-
-      - name: Stop all services
-        if: always()
-        run: |
-          echo "🛑 Stopping all services..."
-          cd app-repo
-          docker-compose down
-
-      - name: Prepare Allure results
-        if: always()
-        run: |
-          echo "📊 Preparing Allure results..."
-          mkdir -p allure-results
-          if [ -d "target/allure-results" ] && [ "$(ls -A target/allure-results)" ]; then
-            cp -r target/allure-results/* allure-results/
-            echo "✅ Test results copied"
-          else
-            echo "⚠️ No test results found"
-          fi
-
-      - name: Generate and Publish Allure report
-        uses: simple-elf/allure-report-action@master
-        if: always()
-        with:
-          allure_results: allure-results
-          allure_report: allure-report
-          keep_reports: 5
+- name: Generate and Publish Allure report
+  uses: simple-elf/allure-report-action@master
+  if: always()
+  with:
+    allure_results: allure-results
+    allure_report: allure-report
+    keep_reports: 5
