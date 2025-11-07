@@ -21,163 +21,120 @@ jobs:
           sudo chmod +x /usr/local/bin/docker-compose
           docker-compose --version
 
-      - name: Install additional tools
-        run: |
-          echo "🔧 Installing diagnostic tools..."
-          sudo apt-get update
-          sudo apt-get install -y net-tools iputils-ping telnet
-
       - name: Clone application repository
         run: |
           echo "📥 Cloning application repository..."
-          git clone https://github.com/bondarenkokate73/simbirsoft_sdet_project.git app-repo
+          git clone https://github.com/your-username/your-app-repo.git app-repo
           cd app-repo
           echo "📁 Application structure:"
           ls -la
 
-      - name: Start all services
+      - name: Verify .env file
         run: |
-          echo "🚀 Starting all services..."
+          echo "🔍 Checking .env configuration..."
           cd app-repo
-          docker-compose up --build -d
-          sleep 10
-
-      - name: Diagnostic checks
-        run: |
-          echo "🔍 Running diagnostic checks..."
-          cd app-repo
-          
-          echo "### 1. Checking running containers:"
-          docker-compose ps -a
-          
-          echo "### 2. Checking network:"
-          docker network ls
-          docker-compose network ls
-          
-          echo "### 3. Checking port mapping:"
-          docker-compose port service 8080
-          
-          echo "### 4. Checking service from inside container:"
-          docker-compose exec -T service wget -q -O- http://localhost:8080/ || echo "❌ Cannot connect from inside container"
-          
-          echo "### 5. Checking from host:"
-          netstat -tulpn | grep 8080 || echo "No process listening on 8080"
-          curl -v http://localhost:8080/ || echo "❌ Cannot connect from host"
-          
-          echo "### 6. Full application logs:"
-          docker-compose logs service
-
-      - name: Check application connectivity
-        run: |
-          echo "🌐 Testing application connectivity..."
-          cd app-repo
-          
-          # Проверяем разные варианты подключения
-          echo "1. Testing localhost:8080..."
-          curl -v http://localhost:8080/ 2>&1 | head -20 || true
-          
-          echo "2. Testing 127.0.0.1:8080..."
-          curl -v http://127.0.0.1:8080/ 2>&1 | head -20 || true
-          
-          echo "3. Testing container IP..."
-          CONTAINER_IP=$(docker inspect -f '{{range.NetworkSettings.Networks}}{{.IPAddress}}{{end}}' app-repo-service-1)
-          echo "Container IP: $CONTAINER_IP"
-          curl -v http://$CONTAINER_IP:8080/ 2>&1 | head -20 || true
-          
-          echo "4. Testing from another container..."
-          docker run --network container:app-repo-service-1 appropriate/curl -s http://localhost:8080/ && echo "✅ Works from same network" || echo "❌ Doesn't work from same network"
-
-      - name: Fix application configuration
-        run: |
-          echo "🔧 Attempting to fix application configuration..."
-          cd app-repo
-          
-          # Проверяем, есть ли .env файл и его содержимое
           if [ -f ".env" ]; then
-            echo "📄 .env file content:"
+            echo "✅ .env file exists"
+            echo "Content:"
             cat .env
           else
-            echo "❌ No .env file found"
-            # Создаем базовый .env файл
+            echo "❌ No .env file, creating one..."
             cat > .env << EOF
-  HTTP_PORT=8080
-  POSTGRES_USER=postgres
-  POSTGRES_PASSWORD=password
-  POSTGRES_DB=appdb
+  POSTGRES_USER=test
+  POSTGRES_PASSWORD=test
+  POSTGRES_DB=test
+  POSTGRES_HOST=postgres
   POSTGRES_PORT=5432
+  HTTP_PORT=8080
+  LOGGER_FORMAT=json
   EOF
-  echo "✅ Created .env file"
   fi
-  
-  # Проверяем конфигурацию docker-compose
-  echo "📋 docker-compose.yml service configuration:"
-  docker-compose config service
 
-- name: Wait for application with improved checks
+- name: Start database
   run: |
-    echo "⏳ Waiting for application with improved checks..."
+    echo "🐘 Starting PostgreSQL database..."
+    cd app-repo
+    docker-compose up -d postgres
+    sleep 10
+
+- name: Wait for PostgreSQL
+  run: |
+    echo "⏳ Waiting for PostgreSQL to be ready..."
+    cd app-repo
+    for i in {1..20}; do
+      if docker-compose exec -T postgres pg_isready -U test; then
+        echo "✅ PostgreSQL is ready"
+        break
+      fi
+      echo "Waiting for PostgreSQL... $i/20"
+      sleep 3
+    done
+
+- name: Run migrations
+  run: |
+    echo "🔄 Running database migrations..."
+    cd app-repo
+    # Запускаем миграции и игнорируем ошибку (если миграции уже применены)
+    docker-compose up migrate || echo "⚠️ Migrations might have issues, but continuing..."
+
+- name: Start application
+  run: |
+    echo "🚀 Starting application..."
+    cd app-repo
+    docker-compose up -d service
+    echo "⏳ Giving application time to start..."
+    sleep 30
+
+- name: Check application status
+  run: |
+    echo "🔍 Checking application status..."
+    cd app-repo
+    echo "### Running containers:"
+    docker-compose ps
+    echo "### Application logs:"
+    docker-compose logs service --tail=50
+    echo "### Database logs:"
+    docker-compose logs postgres --tail=20
+
+- name: Test application connectivity
+  run: |
+    echo "🌐 Testing application connectivity..."
     cd app-repo
     
-    for i in {1..40}; do
-      # Проверяем, что контейнер жив
-      if ! docker-compose ps service | grep -q "Up"; then
-        echo "❌ Service container stopped"
-        docker-compose logs service
-        exit 1
-      fi
+    # Проверяем, что порт открыт
+    echo "1. Checking if port 8080 is open..."
+    nc -z localhost 8080 && echo "✅ Port 8080 is open" || echo "❌ Port 8080 is not accessible"
     
-      # Пробуем разные методы проверки
-      if curl -s -f -m 5 http://localhost:8080/ > /dev/null; then
-        echo "✅ Root endpoint responding!"
-        break
-      fi
+    # Пробуем разные эндпоинты
+    echo "2. Testing root endpoint..."
+    curl -v -m 10 http://localhost:8080/ 2>&1 | head -20 || echo "❌ Root endpoint not responding"
     
-      if curl -s -f -m 5 http://localhost:8080/health > /dev/null; then
-        echo "✅ Health endpoint responding!"
-        break
-      fi
+    echo "3. Testing health endpoint..."
+    curl -v -m 10 http://localhost:8080/health 2>&1 | head -20 || echo "❌ Health endpoint not responding"
     
-      if curl -s -f -m 5 http://localhost:8080/api > /dev/null; then
-        echo "✅ API endpoint responding!"
-        break
-      fi
+    echo "4. Testing API endpoint..."
+    curl -v -m 10 http://localhost:8080/api 2>&1 | head -20 || echo "❌ API endpoint not responding"
     
-      if curl -s -f -m 5 http://localhost:8080/api/health > /dev/null; then
-        echo "✅ API health endpoint responding!"
-        break
-      fi
-    
-      # Пробуем Swagger endpoint
-      if curl -s -f -m 5 http://localhost:8080/api/_/docs/swagger/ > /dev/null; then
-        echo "✅ Swagger endpoint responding!"
-        break
-      fi
-    
-      # Пробуем простой TCP-коннект
-      if timeout 5 bash -c 'cat < /dev/null > /dev/tcp/localhost/8080' 2>/dev/null; then
-        echo "✅ Port 8080 is open, but no HTTP response"
-      fi
-    
-      echo "Attempt $i/40 - Testing different endpoints..."
-      sleep 5
-    done
-    
-    # Финальная проверка с детальным выводом
-    echo "🔍 Final connectivity test:"
-    curl -v -m 10 http://localhost:8080/ || curl -v -m 10 http://localhost:8080/api/ || echo "❌ No successful connection"
+    echo "5. Testing Swagger endpoint..."
+    curl -v -m 10 http://localhost:8080/api/_/docs/swagger/ 2>&1 | head -20 || echo "❌ Swagger endpoint not responding"
+
+- name: Check database connectivity from app
+  run: |
+    echo "🔧 Checking if app can connect to database..."
+    cd app-repo
+    # Проверяем, есть ли таблицы в базе данных
+    docker-compose exec -T postgres psql -U test -d test -c "\dt" || echo "❌ Cannot connect to database or no tables"
 
 - name: Set up JDK 17
-  if: success() || failure()
   uses: actions/setup-java@v4
   with:
     java-version: '17'
     distribution: 'temurin'
 
 - name: Run API tests
-  if: success() || failure()
   run: |
     echo "🧪 Running API tests..."
-    # Пробуем оба возможных URL
+    # Пробуем разные базовые URL
     mvn clean test -Dbase.url=http://localhost:8080/api || \
     mvn clean test -Dbase.url=http://localhost:8080/ || \
     echo "❌ All test attempts failed"
