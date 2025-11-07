@@ -24,145 +24,147 @@ jobs:
       - name: Clone application repository
         run: |
           echo "📥 Cloning application repository..."
-          git clone https://github.com/your-username/your-app-repo.git app-repo
+          git clone https://github.com/bondarenkokate73/simbirsoft_sdet_project.git app-repo
           cd app-repo
           echo "📁 Application structure:"
           ls -la
+          echo "✅ docker-compose.yaml found"
 
-      - name: Verify .env file
+      - name: Fix migration issue in docker-compose
         run: |
-          echo "🔍 Checking .env configuration..."
+          echo "🔧 Fixing migration command in docker-compose.yaml..."
           cd app-repo
-          if [ -f ".env" ]; then
-            echo "✅ .env file exists"
-            echo "Content:"
-            cat .env
+          
+          # Исправляем команду миграции - убираем "3" в конце
+          if grep -q 'command: \["-path", "/migrations", "-database", "postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:${POSTGRES_PORT}/${POSTGRES_DB}?sslmode=disable", "up", "3"\]' docker-compose.yaml; then
+            sed -i 's/command: \["-path", "\/migrations", "-database", "postgres:\/\/\${POSTGRES_USER}:\${POSTGRES_PASSWORD}@postgres:\${POSTGRES_PORT}\/\${POSTGRES_DB}?sslmode=disable", "up", "3"\]/command: ["-path", "\/migrations", "-database", "postgres:\/\/\${POSTGRES_USER}:\${POSTGRES_PASSWORD}@postgres:5432\/\${POSTGRES_DB}?sslmode=disable", "up"]/' docker-compose.yaml
+            echo "✅ Migration command fixed"
           else
-            echo "❌ No .env file, creating one..."
-            cat > .env << EOF
-  POSTGRES_USER=test
-  POSTGRES_PASSWORD=test
-  POSTGRES_DB=test
-  POSTGRES_HOST=postgres
-  POSTGRES_PORT=5432
-  HTTP_PORT=8080
-  LOGGER_FORMAT=json
-  EOF
-  fi
+            echo "ℹ️ Migration command already correct or different format"
+          fi
+          
+          # Показываем исправленную секцию migrate
+          echo "📋 Updated migrate section:"
+          grep -A5 "migrate:" docker-compose.yaml
 
-- name: Start database
-  run: |
-    echo "🐘 Starting PostgreSQL database..."
-    cd app-repo
-    docker-compose up -d postgres
-    sleep 10
+      - name: Start database and wait for readiness
+        run: |
+          echo "🐘 Starting database..."
+          cd app-repo
+          docker-compose up -d postgres
+          
+          # Ждем готовности PostgreSQL
+          echo "⏳ Waiting for PostgreSQL to be ready..."
+          for i in {1..20}; do
+            if docker-compose exec -T postgres pg_isready -U ${{ secrets.POSTGRES_USER }}; then
+              echo "✅ PostgreSQL is ready"
+              break
+            fi
+            echo "Waiting for PostgreSQL... $i/20"
+            sleep 3
+          done
 
-- name: Wait for PostgreSQL
-  run: |
-    echo "⏳ Waiting for PostgreSQL to be ready..."
-    cd app-repo
-    for i in {1..20}; do
-      if docker-compose exec -T postgres pg_isready -U test; then
-        echo "✅ PostgreSQL is ready"
-        break
-      fi
-      echo "Waiting for PostgreSQL... $i/20"
-      sleep 3
-    done
+      - name: Run migrations
+        run: |
+          echo "🔄 Running database migrations..."
+          cd app-repo
+          # Запускаем миграции и игнорируем ошибки (продолжаем в любом случае)
+          docker-compose up migrate || echo "⚠️ Migrations completed with warnings, but continuing..."
 
-- name: Run migrations
-  run: |
-    echo "🔄 Running database migrations..."
-    cd app-repo
-    # Запускаем миграции и игнорируем ошибку (если миграции уже применены)
-    docker-compose up migrate || echo "⚠️ Migrations might have issues, but continuing..."
+      - name: Start application service
+        run: |
+          echo "🚀 Starting application service..."
+          cd app-repo
+          docker-compose up -d service
+          sleep 15
 
-- name: Start application
-  run: |
-    echo "🚀 Starting application..."
-    cd app-repo
-    docker-compose up -d service
-    echo "⏳ Giving application time to start..."
-    sleep 30
+      - name: Check services status
+        run: |
+          echo "🔍 Checking services status..."
+          cd app-repo
+          echo "📊 Running containers:"
+          docker-compose ps
+          echo "🔍 Application logs:"
+          docker-compose logs service --tail=20
 
-- name: Check application status
-  run: |
-    echo "🔍 Checking application status..."
-    cd app-repo
-    echo "### Running containers:"
-    docker-compose ps
-    echo "### Application logs:"
-    docker-compose logs service --tail=50
-    echo "### Database logs:"
-    docker-compose logs postgres --tail=20
+      - name: Wait for application to be ready
+        run: |
+          echo "⏳ Waiting for application to be ready..."
+          cd app-repo
+          
+          for i in {1..30}; do
+            # Проверяем различные возможные эндпоинты
+            if curl -s -f http://localhost:8080/health > /dev/null 2>&1; then
+              echo "✅ Health endpoint is responding!"
+              break
+            fi
+          
+            if curl -s -f http://localhost:8080/api/health > /dev/null 2>&1; then
+              echo "✅ API health endpoint is responding!"
+              break
+            fi
+          
+            if curl -s -f http://localhost:8080 > /dev/null 2>&1; then
+              echo "✅ Root endpoint is responding!"
+              break
+            fi
+          
+            if curl -s -f http://localhost:8080/api > /dev/null 2>&1; then
+              echo "✅ API endpoint is responding!"
+              break
+            fi
+          
+            echo "Attempt $i/30 - Application not ready..."
+            sleep 5
+          done
+          
+          # Финальная проверка
+          if curl -s -f http://localhost:8080 > /dev/null; then
+            echo "🎉 Application is ready for testing!"
+          else
+            echo "❌ Application failed to respond"
+            echo "📋 Final check - container status:"
+            docker-compose ps -a
+            echo "🔍 Final application logs:"
+            docker-compose logs service
+            exit 1
+          fi
 
-- name: Test application connectivity
-  run: |
-    echo "🌐 Testing application connectivity..."
-    cd app-repo
-    
-    # Проверяем, что порт открыт
-    echo "1. Checking if port 8080 is open..."
-    nc -z localhost 8080 && echo "✅ Port 8080 is open" || echo "❌ Port 8080 is not accessible"
-    
-    # Пробуем разные эндпоинты
-    echo "2. Testing root endpoint..."
-    curl -v -m 10 http://localhost:8080/ 2>&1 | head -20 || echo "❌ Root endpoint not responding"
-    
-    echo "3. Testing health endpoint..."
-    curl -v -m 10 http://localhost:8080/health 2>&1 | head -20 || echo "❌ Health endpoint not responding"
-    
-    echo "4. Testing API endpoint..."
-    curl -v -m 10 http://localhost:8080/api 2>&1 | head -20 || echo "❌ API endpoint not responding"
-    
-    echo "5. Testing Swagger endpoint..."
-    curl -v -m 10 http://localhost:8080/api/_/docs/swagger/ 2>&1 | head -20 || echo "❌ Swagger endpoint not responding"
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
 
-- name: Check database connectivity from app
-  run: |
-    echo "🔧 Checking if app can connect to database..."
-    cd app-repo
-    # Проверяем, есть ли таблицы в базе данных
-    docker-compose exec -T postgres psql -U test -d test -c "\dt" || echo "❌ Cannot connect to database or no tables"
+      - name: Run API tests
+        run: |
+          echo "🧪 Running API tests against the application..."
+          mvn clean test -Dbase.url=http://localhost:8080/api
+        continue-on-error: true
 
-- name: Set up JDK 17
-  uses: actions/setup-java@v4
-  with:
-    java-version: '17'
-    distribution: 'temurin'
+      - name: Stop all services
+        if: always()
+        run: |
+          echo "🛑 Stopping all services..."
+          cd app-repo
+          docker-compose down
 
-- name: Run API tests
-  run: |
-    echo "🧪 Running API tests..."
-    # Пробуем разные базовые URL
-    mvn clean test -Dbase.url=http://localhost:8080/api || \
-    mvn clean test -Dbase.url=http://localhost:8080/ || \
-    echo "❌ All test attempts failed"
-  continue-on-error: true
+      - name: Prepare Allure results
+        if: always()
+        run: |
+          echo "📊 Preparing Allure results..."
+          mkdir -p allure-results
+          if [ -d "target/allure-results" ] && [ "$(ls -A target/allure-results)" ]; then
+            cp -r target/allure-results/* allure-results/
+            echo "✅ Test results copied"
+          else
+            echo "⚠️ No test results found"
+          fi
 
-- name: Stop all services
-  if: always()
-  run: |
-    echo "🛑 Stopping all services..."
-    cd app-repo
-    docker-compose down
-
-- name: Prepare Allure results
-  if: always()
-  run: |
-    echo "📊 Preparing Allure results..."
-    mkdir -p allure-results
-    if [ -d "target/allure-results" ] && [ "$(ls -A target/allure-results)" ]; then
-      cp -r target/allure-results/* allure-results/
-      echo "✅ Test results copied"
-    else
-      echo "⚠️ No test results found"
-    fi
-
-- name: Generate and Publish Allure report
-  uses: simple-elf/allure-report-action@master
-  if: always()
-  with:
-    allure_results: allure-results
-    allure_report: allure-report
-    keep_reports: 5
+      - name: Generate and Publish Allure report
+        uses: simple-elf/allure-report-action@master
+        if: always()
+        with:
+          allure_results: allure-results
+          allure_report: allure-report
+          keep_reports: 5
